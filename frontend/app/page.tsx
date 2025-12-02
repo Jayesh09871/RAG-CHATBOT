@@ -12,7 +12,7 @@ export default function App() {
   const [fileName, setFileName] = useState("");
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
-  const BACKEND_URL = "https://rag-chatbot-vnrj.onrender.com";
+  const BACKEND_URL = "http://localhost:5001";
 
   // ===================== 📂 Upload PDF =====================
 const handleFileUpload = async (file: File | null | undefined) => {
