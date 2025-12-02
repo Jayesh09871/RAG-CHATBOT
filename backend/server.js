@@ -12,7 +12,7 @@ const multer = require("multer");
 dotenv.config();
  
 const app = express();
-const allowedOrigins = ["http://localhost:3000", "http://localhost:5001","https://rag-chatbot-mauve-pi.vercel.app"];
+const allowedOrigins = ["http://localhost:3000", "http://localhost:5001","https://rag-chatbot-mauve-pi.vercel.app" , "https://rag-chatbot-vnrj.onrender.com"];
 app.use(
   cors({
     origin: function (origin, callback) {
