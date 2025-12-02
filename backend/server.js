@@ -3,13 +3,14 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const pdfParse = require("pdf-parse");
 const { QdrantClient } = require("@qdrant/js-client-rest");
-const OpenAI = require("openai");
+const Groq = require("groq-sdk");
+const { pipeline } = require("@xenova/transformers");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const multer = require("multer");
 
 dotenv.config();
-
+ 
 const app = express();
 app.use(cors());
 
@@ -20,15 +21,44 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 // Multer setup for file uploads
 const upload = multer({ dest: "uploads/" });
 
-// Initialize APIs
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
 });
-
+ 
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
+  checkCompatibility: false,
 });
+ 
+// Embeddings via local transformer (CPU)
+const VECTOR_SIZE = 384;
+const COLLECTION = "pdf_docs_xenova";
+let embedder;
+async function getEmbedder() {
+  if (!embedder) {
+    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+      quantized: true,
+    });
+  }
+  return embedder;
+}
+
+async function embedText(text) {
+  const extractor = await getEmbedder();
+  const output = await extractor(text, { pooling: "mean", normalize: true });
+  return Array.from(output.data);
+}
+
+async function ensureCollection() {
+  try {
+    await qdrant.getCollection(COLLECTION);
+  } catch (e) {
+    await qdrant.createCollection(COLLECTION, {
+      vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+    });
+  }
+}
 
 // --- Upload PDF, chunk, and store in Qdrant ---
 app.post("/upload", upload.single("file"), async (req, res) => {
@@ -49,15 +79,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       chunks.push(text.slice(i, i + chunkSize));
     }
 
-    // Generate embeddings
+    // Generate embeddings (local)
+    await ensureCollection();
     const embeddings = await Promise.all(
-      chunks.map(async (chunk) => {
-        const emb = await openai.embeddings.create({
-          model: "text-embedding-3-small",
-          input: chunk,
-        });
-        return emb.data[0].embedding;
-      })
+      chunks.map(async (chunk) => embedText(chunk))
     );
 
     // Prepare points for Qdrant
@@ -67,7 +92,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       payload: { text: chunks[idx] },
     }));
 
-    await qdrant.upsert("my-collection", { points });
+    await qdrant.upsert(COLLECTION, { points });
 
     fs.unlinkSync(req.file.path);
 
@@ -84,26 +109,20 @@ app.post("/chat", async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ error: "Message required" });
 
-    const emb = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: message,
-    });
+    await ensureCollection();
+    const embVec = await embedText(message);
 
-    const search = await qdrant.search("pdf_docs", {
-      vector: emb.data[0].embedding,
+    const search = await qdrant.search(COLLECTION, {
+      vector: embVec,
       limit: 3,
     });
 
     const context = search.map((s) => s.payload.text).join("\n");
-    console.log("Retrieved context:", context);
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
       messages: [
-        { role: "system", content: `You are a helpful assistant.` },
-        {
-          role: "user",
-          content: `Question: ${message}`,
-        },
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: `Question: ${message}\n\nContext:\n${context}` },
       ],
       temperature: 2,
     });
