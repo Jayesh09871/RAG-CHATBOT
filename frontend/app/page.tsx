@@ -12,8 +12,11 @@ export default function App() {
   const [fileName, setFileName] = useState("");
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
-  const BACKEND_URL = "http://localhost:5001";
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_LOCALURL;
 
+  
   // ===================== 📂 Upload PDF =====================
 const handleFileUpload = async (file: File | null | undefined) => {
   if (!file) return;
