@@ -36,7 +36,7 @@ const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
   checkCompatibility: false,
-});
+}); 
  
 // Embeddings via local transformer (CPU)
 const VECTOR_SIZE = 384;
@@ -112,19 +112,30 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 // --- Chat route: RAG retrieval + LLM response ---
 app.post("/chat", async (req, res) => {
+  console.log("📩 Incoming Request Body:", req.body);
+
   try {
     const { message } = req.body;
-    if (!message) return res.status(400).json({ error: "Message required" });
+    if (!message) {
+      console.log("❌ No message received");
+      return res.status(400).json({ error: "Message required" });
+    }
 
-    await ensureCollection();
+    console.log("🧠 Embedding user message...");
     const embVec = await embedText(message);
 
+    console.log("🔍 Searching Qdrant...");
     const search = await qdrant.search(COLLECTION, {
       vector: embVec,
       limit: 3,
     });
 
+    console.log("📚 Search Results:", search);
+
     const context = search.map((s) => s.payload.text).join("\n");
+    console.log("📝 Context:", context);
+
+    console.log("🤖 Calling Groq LLM...");
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [
@@ -134,12 +145,16 @@ app.post("/chat", async (req, res) => {
       temperature: 2,
     });
 
+    console.log("💬 LLM Reply:", completion.choices[0].message.content);
+
     res.json({ reply: completion.choices[0].message.content });
+
   } catch (err) {
-    console.error("❌ Chat error:", err);
-    res.status(500).json({ error: "Chat error" });
+    console.error("❌ CHAT ERROR DETAILS:", err);
+    res.status(500).json({ error: err.message });
   }
 });
+
 
 const PORT = 5001;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
