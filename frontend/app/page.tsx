@@ -12,13 +12,12 @@ export default function App() {
   const [fileName, setFileName] = useState("");
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
-// const BACKEND_URL =
-//   process.env.NEXT_PUBLIC_LOCALURL ||
-//   process.env.NEXT_PUBLIC_API_URL
+// const BACKEND_URL = "http://localhost:5001"
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-const BACKEND_URL =
-  process.env.NEXT_PUBLIC_API_URL ||
-  process.env.NEXT_PUBLIC_LOCALURL 
+// const BACKEND_URL =
+//   process.env.NEXT_PUBLIC_API_URL ||
+//   process.env.NEXT_PUBLIC_LOCALURL 
   
   // ===================== 📂 Upload PDF =====================
 const handleFileUpload = async (file: File | null | undefined) => {
@@ -117,7 +116,7 @@ const handleFileUpload = async (file: File | null | undefined) => {
     <div className="flex flex-col h-screen bg-gray-900 text-white">
       {/* Header */}
       <div className="p-4 border-b border-gray-800 text-lg font-semibold flex justify-between items-center">
-        <span>📚 RAG Chatbot Demo</span>
+        <span>📚 RAG Chatbot</span>
         <label className="flex items-center gap-2 cursor-pointer">
           <input
             type="file"

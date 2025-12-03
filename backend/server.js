@@ -3,158 +3,152 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const pdfParse = require("pdf-parse");
 const { QdrantClient } = require("@qdrant/js-client-rest");
-const Groq = require("groq-sdk");
-const { pipeline } = require("@xenova/transformers");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { v4: uuidv4 } = require("uuid");
-const fs = require("fs");
 const multer = require("multer");
 
 dotenv.config();
- 
-const app = express();
 
+const app = express();
 app.use(
   cors({
-    origin: "*", 
+    origin: "*",
     methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
   })
 );
 
-
-// ✅ Fix for “PayloadTooLargeError”
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Multer setup for file uploads
-const upload = multer({ dest: "uploads/" });
+// ----------------------- MULTER MEMORY STORAGE (IMPORTANT) -----------------------
+const storage = multer.memoryStorage();
+const upload = multer({ storage }); // 💥 No disk usage — fully Render compatible
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
- 
+// Gemini Client
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Qdrant Client
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
-  checkCompatibility: false,
-}); 
- 
-// Embeddings via local transformer (CPU)
-const VECTOR_SIZE = 384;
-const COLLECTION = "pdf_docs_xenova";
-let embedder;
-async function getEmbedder() {
-  if (!embedder) {
-    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
-      quantized: true,
-    });
-  }
-  return embedder;
-}
+});
 
-async function embedText(text) {
-  const extractor = await getEmbedder();
-  const output = await extractor(text, { pooling: "mean", normalize: true });
-  return Array.from(output.data);
-}
-
+// ---------------------- Ensure Qdrant Collection Exists ----------------------
 async function ensureCollection() {
-  try {
-    await qdrant.getCollection(COLLECTION);
-  } catch (e) {
-    await qdrant.createCollection(COLLECTION, {
-      vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+  const collections = await qdrant.getCollections();
+  const exists = collections.collections.some((c) => c.name === "pdf_docs");
+
+  if (!exists) {
+    console.log("📌 Creating Qdrant collection (768-dim)...");
+    await qdrant.createCollection("pdf_docs", {
+      vectors: {
+        size: 768, // Gemini 004 embedding dimension
+        distance: "Cosine",
+      },
     });
+    console.log("✅ Collection created successfully!");
   }
 }
+ensureCollection();
 
-// --- Upload PDF, chunk, and store in Qdrant ---
+// ---------------------- Upload PDF (Memory Buffer) ----------------------
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    const dataBuffer = fs.readFileSync(req.file.path);
-    const pdfData = await pdfParse(dataBuffer);
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    // PDF buffer directly from memory
+    const pdfBuffer = req.file.buffer;
+
+    const pdfData = await pdfParse(pdfBuffer);
     const text = pdfData.text.trim();
 
     if (!text) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: "No readable text in PDF" });
+      return res.status(400).json({ error: "No readable text found in PDF" });
     }
 
-    // Split into smaller chunks
+    // -------- Chunking --------
     const chunks = [];
     const chunkSize = 500;
+
     for (let i = 0; i < text.length; i += chunkSize) {
       chunks.push(text.slice(i, i + chunkSize));
     }
 
-    // Generate embeddings (local)
-    await ensureCollection();
+    // -------- Generate embeddings --------
+    const embedModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
+
     const embeddings = await Promise.all(
-      chunks.map(async (chunk) => embedText(chunk))
+      chunks.map(async (chunk) => {
+        const result = await embedModel.embedContent(chunk);
+        return result.embedding.values; // 768-dim
+      })
     );
 
-    // Prepare points for Qdrant
+    // -------- Store in Qdrant --------
     const points = embeddings.map((vec, idx) => ({
       id: uuidv4(),
       vector: vec,
       payload: { text: chunks[idx] },
     }));
 
-    await qdrant.upsert(COLLECTION, { points });
+    await qdrant.upsert("pdf_docs", { points });
 
-    fs.unlinkSync(req.file.path);
-
-    res.json({ message: "✅ File processed and stored successfully!" });
+    res.json({ message: "✅ File processed & stored successfully!" });
   } catch (err) {
     console.error("❌ Upload error:", err);
     res.status(500).json({ error: "Error processing file" });
   }
 });
 
-// --- Chat route: RAG retrieval + LLM response ---
+// ---------------------- Chat Endpoint ----------------------
 app.post("/chat", async (req, res) => {
-  console.log("📩 Incoming Request Body:", req.body);
-
   try {
     const { message } = req.body;
+
     if (!message) {
-      console.log("❌ No message received");
-      return res.status(400).json({ error: "Message required" });
+      return res.status(400).json({ error: "Message is required" });
     }
 
-    console.log("🧠 Embedding user message...");
-    const embVec = await embedText(message);
+    // Generate embedding for user query
+    const embedModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
+    const embedResponse = await embedModel.embedContent(message);
+    const queryEmbedding = embedResponse.embedding.values;
 
-    console.log("🔍 Searching Qdrant...");
-    const search = await qdrant.search(COLLECTION, {
-      vector: embVec,
+    // Qdrant search
+    const search = await qdrant.search("pdf_docs", {
+      vector: queryEmbedding,
       limit: 3,
     });
 
-    console.log("📚 Search Results:", search);
+    const context = search.map((s) => s.payload.text).join("\n\n");
 
-    const context = search.map((s) => s.payload.text).join("\n");
-    console.log("📝 Context:", context);
+    // Generate answer using Gemini 2.5 Flash
+    const chatModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-    console.log("🤖 Calling Groq LLM...");
-    const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: "You are a helpful assistant." },
-        { role: "user", content: `Question: ${message}\n\nContext:\n${context}` },
-      ],
-      temperature: 2,
-    });
+    const prompt = `
+Use ONLY the PDF context below to answer the user's question.
+If answer is not in the PDF, say: "I could not find this in the document."
 
-    console.log("💬 LLM Reply:", completion.choices[0].message.content);
+Context:
+${context}
 
-    res.json({ reply: completion.choices[0].message.content });
+User Question:
+${message}
+`;
 
+    const result = await chatModel.generateContent(prompt);
+    const reply = result.response.text();
+
+    res.json({ reply });
   } catch (err) {
-    console.error("❌ CHAT ERROR DETAILS:", err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Chat error:", err);
+    res.status(500).json({ error: "Chat error" });
   }
 });
 
-
-const PORT = 5001;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// ---------------------- Start Server ----------------------
+const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
